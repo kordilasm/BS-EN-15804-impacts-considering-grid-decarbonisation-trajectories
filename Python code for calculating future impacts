@@ -1,0 +1,1538 @@
+import pandas as pd
+import numpy as np
+import os
+from pathlib import Path
+import re
+
+class FutureImpactsCalculator:
+    def __init__(self, data_folder):
+        self.data_folder = Path(data_folder)
+        self.load_all_data()
+        
+    def load_all_data(self):
+        tech_impacts_path = self.data_folder / "Impacts per MJ of technology inventory.xlsx"
+        ng_eso_path = self.data_folder / "National Grid ESO scenarios.xlsx"
+        eu_path = self.data_folder / "EU future impacts_for python.xlsx"
+        iea_shares_path = self.data_folder / "IEA_Generation_Shares.xlsx"
+        iea_weo_shares_path = self.data_folder / "IEA_WEO_Generation_Shares_Regions.xlsx"
+        iea_global_path = self.data_folder / "IEA GLO future impacts_for python.xlsx"
+        ar6_path = self.data_folder / "AR6_Electricity_Shares for ISO countries.csv"
+        eco_path = self.data_folder / "Ecoinvent geographies.xlsx"
+        iso_path = self.data_folder / "ISO 3166 geographies.xlsx"
+        
+        self.tech_impacts = {}
+        xl_tech = pd.ExcelFile(tech_impacts_path)
+        for sheet in xl_tech.sheet_names:
+            df_raw = xl_tech.parse(sheet, header=None)
+            
+            impact_category_row = None
+            for i in range(min(10, len(df_raw))):
+                if df_raw.iloc[i, 0] == 'Impact category':
+                    impact_category_row = i
+                    break
+            
+            if impact_category_row is None:
+                continue
+            
+            headers = df_raw.iloc[impact_category_row].tolist()
+            data_start_row = impact_category_row + 1
+            df_data = df_raw.iloc[data_start_row:].copy()
+            df_data.columns = headers
+            
+            self.tech_impacts[sheet] = df_data
+        
+        self.ng_eso_data = {}
+        xl_ng = pd.ExcelFile(ng_eso_path)
+        for sheet in xl_ng.sheet_names:
+            self.ng_eso_data[sheet] = xl_ng.parse(sheet)
+        
+        self.eu_data = {}
+        xl_eu = pd.ExcelFile(eu_path)
+        for sheet in xl_eu.sheet_names:
+            self.eu_data[sheet] = xl_eu.parse(sheet)
+        
+        self.iea_shares = {}
+        xl_iea = pd.ExcelFile(iea_shares_path)
+        for sheet in xl_iea.sheet_names:
+            df = xl_iea.parse(sheet, index_col=0)
+            self.iea_shares[sheet] = df
+        
+        self.iea_weo_shares = {}
+        xl_weo = pd.ExcelFile(iea_weo_shares_path)
+        for sheet in xl_weo.sheet_names:
+            df = xl_weo.parse(sheet)
+            if 'Technology_Formatted' in df.columns:
+                df = df.set_index('Technology_Formatted')
+            self.iea_weo_shares[sheet] = df
+        
+        self.iea_global = {}
+        xl_global = pd.ExcelFile(iea_global_path)
+        for sheet in xl_global.sheet_names:
+            self.iea_global[sheet] = xl_global.parse(sheet)
+        
+        self.ar6_data = pd.read_csv(ar6_path)
+        
+        self.geographies = pd.read_excel(eco_path, sheet_name="Geographies")
+        self.build_region_mappings()
+        
+        iso_df = pd.read_excel(iso_path, header=None)
+        self.country_name_to_code = dict(zip(iso_df[0], iso_df[1]))
+        self.code_to_country_name = dict(zip(iso_df[1], iso_df[0]))
+        
+        self.transmission_impacts = {
+            'Acidification': 2.42e-04 / 3.6,
+            'Climate change': 0.005715102 / 3.6,
+            'Climate change - Biogenic': -4.20e-05 / 3.6,
+            'Climate change - Fossil': 0.005750229 / 3.6,
+            'Climate change - Land use and LU change': 6.88e-06 / 3.6,
+            'Ecotoxicity, freshwater': 0.311998558 / 3.6,
+            'Ecotoxicity, freshwater - inorganics': 0.302320834 / 3.6,
+            'Ecotoxicity, freshwater - organics': 0.009677731 / 3.6,
+            'Particulate matter': 7.11e-10 / 3.6,
+            'Eutrophication, marine': 1.39e-05 / 3.6,
+            'Eutrophication, freshwater': 1.86e-05 / 3.6,
+            'Eutrophication, terrestrial': 1.86e-04 / 3.6,
+            'Human toxicity, cancer': 7.10e-11 / 3.6,
+            'Human toxicity, cancer - inorganics': 2.47e-11 / 3.6,
+            'Human toxicity, cancer - organics': 4.63e-11 / 3.6,
+            'Human toxicity, non-cancer': 2.53e-09 / 3.6,
+            'Human toxicity, non-cancer - inorganics': 2.39e-09 / 3.6,
+            'Human toxicity, non-cancer - organics': 1.48e-10 / 3.6,
+            'Ionising radiation': 3.63e-04 / 3.6,
+            'Land use': 9.68e-02 / 3.6,
+            'Ozone depletion': 1.21e-10 / 3.6,
+            'Photochemical ozone formation': 5.40e-05 / 3.6,
+            'Resource use, fossils': 0.061473079 / 3.6,
+            'Resource use, minerals and metals': 3.20e-06 / 3.6,
+            'Water use': 3.91e-03 / 3.6
+        }
+        
+        self.tech_mapping = {
+            'Nuclear': 'Nuclear - PWR',
+            'Coal': 'Coal',
+            'Lignite': 'Lignite',
+            'Natural gas & biogas': 'Gas',
+            'Derived gas': 'Gas',
+            'Refinery gas': 'Gas',
+            'Diesel oil': 'Oil',
+            'Fuel Oil': 'Oil',
+            'Solid biomass & waste': 'Biofuels',
+            'Fuel cells': 'Hydrogen',
+            'Onshore': 'Wind - onshore',
+            'Offshore': 'Wind - offshore',
+            'Solar photovoltaics': 'Solar',
+            'Solar thermal': 'Solar - thermal',
+            'Geothermal': 'Geothermal',
+            'Hydro': 'Hydro - reservoir',
+            'Pumped hydro': 'Hydro - pumped',
+            'Batteries': 'Compressed air',
+            'Gas': 'Gas',
+            'Oil': 'Oil',
+            'Biofuels': 'Biofuels',
+            'Wind onshore': 'Wind - onshore',
+            'Wind offshore': 'Wind - offshore',
+            'Solar PV': 'Solar',
+            'Solar CSP': 'Solar - thermal',
+            'Hydroelectric': 'Hydro - reservoir',
+            'Nuclear power': 'Nuclear - PWR',
+            'Hydropower': 'Hydro - reservoir',
+            'Wind power': 'Wind - onshore',
+            'Solar power': 'Solar',
+            'Coal without CCS': 'Coal',
+            'Gas without CCS': 'Gas',
+            'Coal with CCS': 'Coal',
+            'Gas with CCS': 'Gas',
+        }
+        
+        self.ar6_tech_mapping = {
+            'Secondary Energy|Electricity|Biomass': 'Biofuels',
+            'Secondary Energy|Electricity|Coal': 'Coal',
+            'Secondary Energy|Electricity|Gas': 'Gas',
+            'Secondary Energy|Electricity|Hydro': 'Hydro - reservoir',
+            'Secondary Energy|Electricity|Nuclear': 'Nuclear - PWR',
+            'Secondary Energy|Electricity|Solar|PV': 'Solar',
+            'Secondary Energy|Electricity|Solar': 'Solar',
+            'Secondary Energy|Electricity|Solar|CSP': 'Solar - thermal',
+            'Secondary Energy|Electricity|Wind|Offshore': 'Wind - offshore',
+            'Secondary Energy|Electricity|Wind|Onshore': 'Wind - onshore',
+            'Secondary Energy|Electricity|Geothermal': 'Geothermal',
+            'Secondary Energy|Electricity|Ocean': None
+        }
+        
+        self.scenario_mapping = {
+            'FS': {'uk': 'FS', 'eu': 'CENTRAL (FS)', 'iea': 'BAU', 'global': 'GLO (BAU)'},
+            'ST': {'uk': 'ST', 'eu': 'CETO (ST_CT_LW)', 'iea': 'STEPS', 'global': 'GLO (STEPS)'},
+            'CT': {'uk': 'CT', 'eu': 'CETO (ST_CT_LW)', 'iea': 'STEPS', 'global': 'GLO (STEPS)'},
+            'LW': {'uk': 'LW', 'eu': 'CETO (ST_CT_LW)', 'iea': 'ASPTARGET', 'global': 'GLO (NZE)'}
+        }
+    
+    def build_region_mappings(self):
+        self.country_to_ecoinvent_regions = {}
+        self.ecoinvent_region_countries = {}
+        
+        for idx, row in self.geographies.iterrows():
+            region_name = row['Name']
+            contained = row['Contained and Overlapping Geographies']
+            
+            if pd.notna(contained):
+                countries = [c.strip() for c in str(contained).split(';')]
+                self.ecoinvent_region_countries[region_name] = countries
+                
+                for country in countries:
+                    if country not in self.country_to_ecoinvent_regions:
+                        self.country_to_ecoinvent_regions[country] = []
+                    self.country_to_ecoinvent_regions[country].append(region_name)
+    
+    def clean_region_name(self, name):
+        if not isinstance(name, str):
+            return ""
+        name = name.lower()
+        remove_words = ['rest of ', 'rest-of-', 'without', 'w/o', 'region', 'un ', 'subregion', 
+                       'commonwealth of independent states', 'free trade agreement']
+        for word in remove_words:
+            name = name.replace(word, '')
+        name = name.replace(' and ', ' & ')
+        name = name.replace(' & ', ' and ')
+        return name.strip()
+    
+    def regions_match(self, eco_name, weo_name):
+        eco_name = eco_name.lower()
+        weo_name = weo_name.lower()
+        
+        if eco_name == weo_name:
+            return True
+        
+        if '(' in eco_name and ')' in eco_name:
+            eco_country = eco_name.split('(')[0].strip()
+            weo_country = weo_name.split('(')[0].strip()
+            
+            if eco_country and weo_country and eco_country == weo_country:
+                return True
+        
+        known_mappings = {
+            'russia': 'russia',
+            'russia (europe)': 'russia',
+            'russia (asia)': 'russia',
+            'india': 'india',
+            'china': 'china',
+            'united states of america': 'united states',
+            'united states': 'united states',
+            'european union': 'european union',
+            'europe': 'europe',
+            'asia pacific': 'asia pacific',
+            'middle east': 'middle east',
+            'africa': 'africa',
+            'south america': 'central and south america',
+            'latin america and the caribbean': 'central and south america',
+            'northern america': 'north america',
+            'southern asia': 'asia pacific',
+            'asia without china': 'asia pacific',
+            'asia': 'asia pacific',
+            'eurasia': 'eurasia',
+            'south-eastern asia': 'southeast asia',
+        }
+        
+        if eco_name in known_mappings:
+            return known_mappings[eco_name] in weo_name
+        
+        if eco_name in weo_name or weo_name in eco_name:
+            if 'china' in weo_name and 'india' in eco_name:
+                return False
+            if 'india' in weo_name and 'china' in eco_name:
+                return False
+            return True
+        
+        return False
+    
+    def extract_regions_from_excel(self):
+        impacts_subtract_path = self.data_folder / "Impacts to subtract.xlsm"
+        
+        try:
+            paste_df = pd.read_excel(impacts_subtract_path, sheet_name="Paste results here", header=None)
+            
+            regions_data = []
+            
+            for idx, row in paste_df.iterrows():
+                if pd.isna(row[1]):
+                    continue
+                    
+                process = str(row[1])
+                
+                if 'market for electricity' in process:
+                    voltage_match = re.search(r'electricity, (high|medium|low) voltage', process, re.IGNORECASE)
+                    if voltage_match:
+                        voltage = voltage_match.group(1).lower()
+                        region_match = re.search(r'\{(.*?)\}', process)
+                        if region_match:
+                            region = region_match.group(1)
+                            
+                            base_region = region
+                            if '-' in region:
+                                base_parts = region.split('-')
+                                base_region = base_parts[0].strip()
+                            
+                            amount = 0
+                            if len(row) > 4 and pd.notna(row[4]):
+                                try:
+                                    amount = float(row[4])
+                                except:
+                                    amount = 0
+                            
+                            regions_data.append({
+                                'region': region,
+                                'base_region': base_region,
+                                'voltage': voltage,
+                                'amount_mj': amount,
+                                'process': process
+                            })
+            
+            return regions_data
+            
+        except Exception as e:
+            return []
+    
+    def read_subtract_totals(self):
+        impacts_subtract_path = self.data_folder / "Impacts to subtract.xlsm"
+        
+        try:
+            subtract_df = pd.read_excel(impacts_subtract_path, sheet_name="Subtract sum")
+            
+            subtract_totals = {}
+            
+            for idx, row in subtract_df.iterrows():
+                impact_cat = None
+                if 'Impact categories' in subtract_df.columns:
+                    impact_cat = row['Impact categories']
+                elif 'Impact category' in subtract_df.columns:
+                    impact_cat = row['Impact category']
+                
+                if pd.notna(impact_cat):
+                    value = None
+                    if 'TOTAL TO SUBTRACT' in subtract_df.columns:
+                        value = row['TOTAL TO SUBTRACT']
+                    elif any('subtract' in str(col).lower() for col in subtract_df.columns):
+                        for col in subtract_df.columns:
+                            if 'subtract' in str(col).lower():
+                                value = row[col]
+                                break
+                    
+                    if pd.notna(value):
+                        subtract_totals[str(impact_cat).strip()] = float(value)
+            
+            return subtract_totals
+            
+        except Exception as e:
+            return {}
+    
+    def read_simapro_impacts(self):
+        simapro_path = self.data_folder / "SimaPro impacts.xlsx"
+        
+        try:
+            simapro_df = pd.read_excel(simapro_path, sheet_name="Sheet1")
+            
+            simapro_impacts = {}
+            for idx, row in simapro_df.iterrows():
+                impact_cat = row['Impact category']
+                if pd.notna(impact_cat):
+                    value = None
+                    for col in simapro_df.columns:
+                        if col != 'Impact category' and col != 'Unit':
+                            val = row[col]
+                            if pd.notna(val):
+                                value = float(val)
+                                break
+                    
+                    if value is not None:
+                        simapro_impacts[str(impact_cat).strip()] = value
+            
+            return simapro_impacts
+            
+        except Exception as e:
+            return {}
+    
+    def get_nearest_year(self, target_year, available_years):
+        numeric_years = []
+        for year in available_years:
+            try:
+                if isinstance(year, str):
+                    if year.isdigit():
+                        numeric_years.append(int(year))
+                    elif '.' in year and year.replace('.', '', 1).isdigit():
+                        numeric_years.append(int(float(year)))
+                    elif any(char.isdigit() for char in year):
+                        match = re.search(r'(\d+)', year)
+                        if match:
+                            numeric_years.append(int(match.group(1)))
+                else:
+                    numeric_years.append(int(year))
+            except (ValueError, TypeError):
+                continue
+        
+        if not numeric_years:
+            return None
+        
+        return min(numeric_years, key=lambda x: abs(x - target_year))
+    
+    def get_region_tech_impacts(self, region_code, tech_sheet):
+        if tech_sheet not in self.tech_impacts:
+            return None
+        
+        df = self.tech_impacts[tech_sheet]
+        region_code = str(region_code).strip()
+        
+        hierarchies = []
+        hierarchies.append(f'{{{region_code}}}')
+        
+        if '-' in region_code:
+            base_country = region_code.split('-')[0].strip()
+            hierarchies.append(f'{{{base_country}}}')
+        
+        if '-' in region_code:
+            base_country = region_code.split('-')[0].strip()
+            hierarchies.append(f'{{{base_country}-')
+        
+        if '-' not in region_code:
+            hierarchies.append(f'{{{region_code}-')
+        
+        hierarchies.append('{RoW}')
+        hierarchies.append('{GLO}')
+        hierarchies.append('{World}')
+        
+        for region_pattern in hierarchies:
+            region_cols = [col for col in df.columns 
+                          if isinstance(col, str) and region_pattern in col]
+            if region_cols:
+                impacts = {}
+                for idx, row in df.iterrows():
+                    impact_category = row['Impact category']
+                    values = []
+                    for col in region_cols:
+                        val = row[col]
+                        if pd.notna(val):
+                            try:
+                                values.append(float(val))
+                            except (ValueError, TypeError):
+                                continue
+                    
+                    if values:
+                        impacts[impact_category] = np.mean(values)
+                
+                if impacts:
+                    return impacts
+        
+        return None
+    
+    def get_iea_sheet_for_country(self, country_name, scenario):
+        country_name_upper = country_name.upper()
+        scenario_upper = scenario.upper()
+        
+        exact_name = f"{country_name_upper} ({scenario_upper})"
+        if exact_name in self.iea_shares:
+            return exact_name
+        
+        clean_name = re.sub(r'\s*\([^)]*\)\s*', '', country_name_upper).strip()
+        if clean_name and clean_name != country_name_upper:
+            clean_sheet = f"{clean_name} ({scenario_upper})"
+            if clean_sheet in self.iea_shares:
+                return clean_sheet
+        
+        return None
+    
+    def get_weo_sheet_name(self, base_name, scenario):
+        full_name = f"{base_name} ({scenario})".lower()
+        
+        for sheet in self.iea_weo_shares.keys():
+            if sheet.lower() == full_name:
+                return sheet
+        
+        for sheet in self.iea_weo_shares.keys():
+            sheet_lower = sheet.lower()
+            if sheet_lower.startswith(base_name.lower() + " (") and f"({scenario.lower()}" in sheet_lower:
+                return sheet
+        
+        for sheet in self.iea_weo_shares.keys():
+            sheet_lower = sheet.lower()
+            if base_name.lower() in sheet_lower and scenario.lower() in sheet_lower:
+                return sheet
+        
+        return None
+    
+    def find_weo_region_for_country(self, country_code, weo_scenario):
+        if country_code not in self.country_to_ecoinvent_regions:
+            return None
+        
+        country_name = self.code_to_country_name.get(country_code, country_code)
+        
+        for sheet_name in self.iea_weo_shares.keys():
+            if f"({weo_scenario})" in sheet_name or f"({weo_scenario}" in sheet_name:
+                sheet_region = sheet_name.split('(')[0].strip()
+                
+                if country_name.lower() in sheet_region.lower() or sheet_region.lower() in country_name.lower():
+                    return sheet_name
+        
+        ecoinvent_regions = self.country_to_ecoinvent_regions[country_code]
+        
+        weo_regional_sheets = [
+            'North America', 'Central and South America', 'Europe', 
+            'European Union', 'Africa', 'Middle East', 'Eurasia',
+            'Asia Pacific', 'Southeast Asia', 'World'
+        ]
+        
+        for sheet_name in self.iea_weo_shares.keys():
+            if f"({weo_scenario})" in sheet_name or f"({weo_scenario}" in sheet_name:
+                sheet_region = sheet_name.split('(')[0].strip()
+                
+                is_regional = any(regional.lower() in sheet_region.lower() 
+                                for regional in weo_regional_sheets)
+                
+                if is_regional:
+                    for eco_region in ecoinvent_regions:
+                        eco_clean = self.clean_region_name(eco_region)
+                        sheet_clean = self.clean_region_name(sheet_region)
+                        
+                        if self.regions_match(eco_clean, sheet_clean):
+                            return sheet_name
+        
+        return None
+    
+    def get_iea_data_for_region(self, country_code, scenario, use_weo=True):
+        iea_scenario = self.scenario_mapping[scenario]['iea']
+        
+        country_name = self.code_to_country_name.get(country_code)
+        
+        if country_name:
+            isp_sheet = self.get_iea_sheet_for_country(country_name, iea_scenario)
+            if isp_sheet and isp_sheet in self.iea_shares:
+                return ("ISP", isp_sheet, iea_scenario)
+        
+        if use_weo and scenario != 'LW':
+            weo_scenario = 'CPS' if scenario == 'FS' else 'STEPS'
+            
+            if country_name:
+                country_sheet = self.get_weo_sheet_name(country_name, weo_scenario)
+                if country_sheet:
+                    return ("WEO_COUNTRY", country_sheet, weo_scenario)
+        
+        return None
+        
+    def calculate_future_impacts_option1(self, regions_data, target_year, scenario, use_eu_for_eu=True):
+        scenario_data = self.scenario_mapping[scenario]
+        total_add = {}
+        
+        source_tracking = {}
+        
+        for i, item in enumerate(regions_data, 1):
+            region = item['region']
+            base_region = item['base_region']
+            voltage = item['voltage']
+            amount_mj = item['amount_mj']
+            
+            source_used = None
+            sheet_used = None
+            
+            eu_countries = ['EU', 'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 
+                           'FR', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 
+                           'PL', 'PT', 'RO', 'SE', 'SI', 'SK']
+            
+            is_eu_country = base_region in eu_countries
+            
+            if base_region == 'GB':
+                uk_sheet = scenario_data['uk']
+                if uk_sheet in self.ng_eso_data:
+                    uk_df = self.ng_eso_data[uk_sheet]
+                    year_cols = [col for col in uk_df.columns if str(col).isdigit()]
+                    nearest_year = self.get_nearest_year(target_year, year_cols)
+                    
+                    if nearest_year:
+                        high_impacts = {}
+                        for _, uk_row in uk_df.iterrows():
+                            impact_cat = uk_row.iloc[0]
+                            if pd.notna(impact_cat) and nearest_year in uk_df.columns:
+                                impact_kwh = uk_row[nearest_year]
+                                if pd.notna(impact_kwh):
+                                    high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                        
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = "UK"
+                            sheet_used = uk_sheet
+                            continue
+            
+            if is_eu_country:
+                if use_eu_for_eu:
+                    eu_sheet = scenario_data['eu']
+                    if eu_sheet in self.eu_data:
+                        eu_df = self.eu_data[eu_sheet]
+                        year_cols = [col for col in eu_df.columns if str(col).isdigit()]
+                        nearest_year = self.get_nearest_year(target_year, year_cols)
+                        
+                        if nearest_year:
+                            high_impacts = {}
+                            for _, eu_row in eu_df.iterrows():
+                                impact_cat = eu_row.iloc[0]
+                                if pd.notna(impact_cat) and nearest_year in eu_df.columns:
+                                    impact_kwh = eu_row[nearest_year]
+                                    if pd.notna(impact_kwh):
+                                        high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                            
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "EU"
+                                sheet_used = eu_sheet
+                                continue
+                
+                else:
+                    country_to_check = base_region
+                    
+                    iea_result = self.get_iea_data_for_region(country_to_check, scenario, use_weo=True)
+                    if iea_result:
+                        source_type, sheet_name, data_scenario = iea_result
+                        high_impacts = self._calculate_from_iea_shares(source_type, sheet_name, data_scenario, country_to_check, target_year, base_region)
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = source_type
+                            sheet_used = sheet_name
+                            continue
+                    
+                    eu_sheet = scenario_data['eu']
+                    if eu_sheet in self.eu_data:
+                        eu_df = self.eu_data[eu_sheet]
+                        year_cols = [col for col in eu_df.columns if str(col).isdigit()]
+                        nearest_year = self.get_nearest_year(target_year, year_cols)
+                        
+                        if nearest_year:
+                            high_impacts = {}
+                            for _, eu_row in eu_df.iterrows():
+                                impact_cat = eu_row.iloc[0]
+                                if pd.notna(impact_cat) and nearest_year in eu_df.columns:
+                                    impact_kwh = eu_row[nearest_year]
+                                    if pd.notna(impact_kwh):
+                                        high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                            
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "EU (IEA fallback)"
+                                sheet_used = eu_sheet
+                                continue
+            
+            if not source_used and not is_eu_country:
+                country_to_check = base_region
+                
+                iea_result = self.get_iea_data_for_region(country_to_check, scenario, use_weo=True)
+                if iea_result:
+                    source_type, sheet_name, data_scenario = iea_result
+                    high_impacts = self._calculate_from_iea_shares(source_type, sheet_name, data_scenario, country_to_check, target_year, base_region)
+                    if high_impacts:
+                        future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                        self._add_to_total(total_add, future_impact, amount_mj)
+                        source_used = source_type
+                        sheet_used = sheet_name
+                        continue
+                
+                if scenario != 'LW':
+                    weo_scenario = 'CPS' if scenario == 'FS' else 'STEPS'
+                    
+                    country_name = self.code_to_country_name.get(country_to_check)
+                    if country_name:
+                        country_sheet_found = None
+                        for sheet in self.iea_weo_shares.keys():
+                            if f"({weo_scenario})" in sheet or f"({weo_scenario}" in sheet:
+                                sheet_country = sheet.split('(')[0].strip()
+                                
+                                country_name_lower = country_name.lower()
+                                sheet_country_lower = sheet_country.lower()
+                                
+                                if (country_name_lower == sheet_country_lower or 
+                                    country_name_lower in sheet_country_lower or
+                                    sheet_country_lower in country_name_lower):
+                                    
+                                    country_sheet_found = sheet
+                                    break
+                        
+                        if country_sheet_found:
+                            high_impacts = self._calculate_from_iea_shares("WEO_COUNTRY", country_sheet_found, weo_scenario, country_to_check, target_year, base_region)
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "WEO_COUNTRY"
+                                sheet_used = country_sheet_found
+                                continue
+                    
+                    region_sheet = self.find_weo_region_for_country(country_to_check, weo_scenario)
+                    if region_sheet:
+                        sheet_region_name = region_sheet.split('(')[0].strip().lower()
+                        if 'world' in sheet_region_name:
+                            pass
+                        else:
+                            high_impacts = self._calculate_from_iea_shares("WEO_REGION", region_sheet, weo_scenario, country_to_check, target_year, base_region)
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "WEO_REGION"
+                                sheet_used = region_sheet
+                                continue
+            
+            if not source_used:
+                global_sheet = scenario_data['global']
+                if global_sheet in self.iea_global:
+                    global_df = self.iea_global[global_sheet]
+                    year_cols = [col for col in global_df.columns if str(col).isdigit()]
+                    nearest_year = self.get_nearest_year(target_year, year_cols)
+                    
+                    if nearest_year:
+                        high_impacts = {}
+                        for _, global_row in global_df.iterrows():
+                            impact_cat = global_row.iloc[0]
+                            if pd.notna(impact_cat) and nearest_year in global_df.columns:
+                                impact_kwh = global_row[nearest_year]
+                                if pd.notna(impact_kwh):
+                                    high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                        
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = "GLOBAL"
+                            sheet_used = global_sheet
+        
+            if base_region not in source_tracking:
+                source_tracking[base_region] = []
+            
+            source_tracking[base_region].append({
+                'region': region,
+                'source': source_used,
+                'sheet': sheet_used,
+                'amount_mj': amount_mj
+            })
+        
+        return total_add
+    
+    def calculate_future_impacts_option2(self, regions_data, target_year, scenario, ar6_model, ar6_scenario, use_eu_for_eu=True):
+        scenario_data = self.scenario_mapping[scenario]
+        
+        ar6_filtered = self.ar6_data[
+            (self.ar6_data['Model'] == ar6_model) & 
+            (self.ar6_data['Scenario'] == ar6_scenario)
+        ]
+        
+        total_add = {}
+        
+        source_attempts_tracking = {}
+        source_tracking = {}
+        
+        for i, item in enumerate(regions_data, 1):
+            region = item['region']
+            base_region = item['base_region']
+            voltage = item['voltage']
+            amount_mj = item['amount_mj']
+            
+            if base_region not in source_attempts_tracking:
+                source_attempts_tracking[base_region] = []
+            
+            source_used = None
+            sheet_used = None
+            
+            eu_countries = ['EU', 'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 
+                           'FR', 'GR', 'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 
+                           'PL', 'PT', 'RO', 'SE', 'SI', 'SK']
+            
+            is_eu_country = base_region in eu_countries
+            
+            if base_region == 'GB':
+                uk_sheet = scenario_data['uk']
+                if uk_sheet in self.ng_eso_data:
+                    uk_df = self.ng_eso_data[uk_sheet]
+                    year_cols = [col for col in uk_df.columns if str(col).isdigit()]
+                    nearest_year = self.get_nearest_year(target_year, year_cols)
+                    
+                    if nearest_year:
+                        high_impacts = {}
+                        for _, uk_row in uk_df.iterrows():
+                            impact_cat = uk_row.iloc[0]
+                            if pd.notna(impact_cat) and nearest_year in uk_df.columns:
+                                impact_kwh = uk_row[nearest_year]
+                                if pd.notna(impact_kwh):
+                                    high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                        
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = "UK"
+                            sheet_used = uk_sheet
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'UK', 
+                                'success': True,
+                                'region': region,
+                                'sheet': sheet_used
+                            })
+                            if base_region not in source_tracking:
+                                source_tracking[base_region] = []
+                            source_tracking[base_region].append({
+                                'region': region,
+                                'source': source_used,
+                                'sheet': sheet_used,
+                                'amount_mj': amount_mj
+                            })
+                            continue
+                        else:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'UK', 
+                                'success': False,
+                                'reason': 'No impacts calculated',
+                                'region': region
+                            })
+                    else:
+                        source_attempts_tracking[base_region].append({
+                            'attempt': 'UK', 
+                            'success': False,
+                            'reason': f'No nearest year for {target_year}',
+                            'region': region
+                        })
+                else:
+                    source_attempts_tracking[base_region].append({
+                        'attempt': 'UK', 
+                        'success': False,
+                        'reason': f'Sheet {uk_sheet} not found',
+                        'region': region
+                    })
+            
+            country_to_check = base_region
+            ar6_region_data = ar6_filtered[ar6_filtered['Region'] == country_to_check]
+            
+            if ar6_region_data.empty:
+                ar6_region_data = ar6_filtered[ar6_filtered['Region'] == region]
+            
+            if not ar6_region_data.empty:
+                year_cols = [col for col in ar6_region_data.columns if str(col).isdigit()]
+                nearest_year = self.get_nearest_year(target_year, year_cols)
+                
+                if nearest_year and str(nearest_year) in ar6_region_data.columns:
+                    shares_dict = {}
+                    for _, ar6_row in ar6_region_data.iterrows():
+                        variable = ar6_row['Variable']
+                        tech_sheet = self.ar6_tech_mapping.get(variable)
+                        if tech_sheet:
+                            share = ar6_row[str(nearest_year)]
+                            if pd.notna(share):
+                                shares_dict[tech_sheet] = share
+                    
+                    if shares_dict:
+                        high_impacts = self._calculate_from_ar6_shares(shares_dict, base_region)
+                        
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = "AR6"
+                            sheet_used = f"{ar6_model} - {ar6_scenario}"
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'AR6', 
+                                'success': True,
+                                'region': region,
+                                'model': ar6_model,
+                                'scenario': ar6_scenario,
+                                'year': nearest_year
+                            })
+                            if base_region not in source_tracking:
+                                source_tracking[base_region] = []
+                            source_tracking[base_region].append({
+                                'region': region,
+                                'source': source_used,
+                                'sheet': sheet_used,
+                                'amount_mj': amount_mj
+                            })
+                            continue
+                        else:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'AR6', 
+                                'success': False,
+                                'reason': 'No impacts calculated from shares',
+                                'region': region,
+                                'shares_count': len(shares_dict)
+                            })
+                    else:
+                        source_attempts_tracking[base_region].append({
+                            'attempt': 'AR6', 
+                            'success': False,
+                            'reason': 'No shares mapped from variables',
+                            'region': region,
+                            'variables': list(ar6_region_data['Variable'].unique())[:5]
+                        })
+                else:
+                    source_attempts_tracking[base_region].append({
+                        'attempt': 'AR6', 
+                        'success': False,
+                        'reason': f'Year {nearest_year} not available',
+                        'region': region,
+                        'available_years': year_cols[:10]
+                    })
+            else:
+                source_attempts_tracking[base_region].append({
+                    'attempt': 'AR6', 
+                    'success': False,
+                    'reason': 'No AR6 data found for region',
+                    'region': region,
+                    'searched_for': [country_to_check, region]
+                })
+            
+            if is_eu_country:
+                if use_eu_for_eu:
+                    eu_sheet = scenario_data['eu']
+                    if eu_sheet in self.eu_data:
+                        eu_df = self.eu_data[eu_sheet]
+                        year_cols = [col for col in eu_df.columns if str(col).isdigit()]
+                        nearest_year = self.get_nearest_year(target_year, year_cols)
+                        
+                        if nearest_year:
+                            high_impacts = {}
+                            for _, eu_row in eu_df.iterrows():
+                                impact_cat = eu_row.iloc[0]
+                                if pd.notna(impact_cat) and nearest_year in eu_df.columns:
+                                    impact_kwh = eu_row[nearest_year]
+                                    if pd.notna(impact_kwh):
+                                        high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                            
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "EU"
+                                sheet_used = eu_sheet
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'EU', 
+                                    'success': True,
+                                    'region': region,
+                                    'sheet': sheet_used
+                                })
+                                if base_region not in source_tracking:
+                                    source_tracking[base_region] = []
+                                source_tracking[base_region].append({
+                                    'region': region,
+                                    'source': source_used,
+                                    'sheet': sheet_used,
+                                    'amount_mj': amount_mj
+                                })
+                                continue
+                            else:
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'EU', 
+                                    'success': False,
+                                    'reason': 'No impacts calculated',
+                                    'region': region
+                                })
+                        else:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'EU', 
+                                'success': False,
+                                'reason': f'No nearest year for {target_year}',
+                                'region': region
+                            })
+                    else:
+                        source_attempts_tracking[base_region].append({
+                            'attempt': 'EU', 
+                            'success': False,
+                            'reason': f'Sheet {eu_sheet} not found',
+                            'region': region
+                        })
+                
+                else:
+                    country_to_check = base_region
+                    
+                    iea_result = self.get_iea_data_for_region(country_to_check, scenario, use_weo=True)
+                    if iea_result:
+                        source_type, sheet_name, data_scenario = iea_result
+                        high_impacts = self._calculate_from_iea_shares(source_type, sheet_name, data_scenario, country_to_check, target_year, base_region)
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = source_type
+                            sheet_used = sheet_name
+                            source_attempts_tracking[base_region].append({
+                                'attempt': source_type, 
+                                'success': True,
+                                'region': region,
+                                'sheet': sheet_used
+                            })
+                            if base_region not in source_tracking:
+                                source_tracking[base_region] = []
+                            source_tracking[base_region].append({
+                                'region': region,
+                                'source': source_used,
+                                'sheet': sheet_used,
+                                'amount_mj': amount_mj
+                            })
+                            continue
+                        else:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'IEA', 
+                                'success': False,
+                                'reason': 'No impacts calculated',
+                                'region': region
+                            })
+                    
+                    eu_sheet = scenario_data['eu']
+                    if eu_sheet in self.eu_data:
+                        eu_df = self.eu_data[eu_sheet]
+                        year_cols = [col for col in eu_df.columns if str(col).isdigit()]
+                        nearest_year = self.get_nearest_year(target_year, year_cols)
+                        
+                        if nearest_year:
+                            high_impacts = {}
+                            for _, eu_row in eu_df.iterrows():
+                                impact_cat = eu_row.iloc[0]
+                                if pd.notna(impact_cat) and nearest_year in eu_df.columns:
+                                    impact_kwh = eu_row[nearest_year]
+                                    if pd.notna(impact_kwh):
+                                        high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                            
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "EU (IEA fallback)"
+                                sheet_used = eu_sheet
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'EU (IEA fallback)', 
+                                    'success': True,
+                                    'region': region,
+                                    'sheet': sheet_used
+                                })
+                                if base_region not in source_tracking:
+                                    source_tracking[base_region] = []
+                                source_tracking[base_region].append({
+                                    'region': region,
+                                    'source': source_used,
+                                    'sheet': sheet_used,
+                                    'amount_mj': amount_mj
+                                })
+                                continue
+                            else:
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'EU (IEA fallback)', 
+                                    'success': False,
+                                    'reason': 'No impacts calculated',
+                                    'region': region
+                                })
+                        else:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'EU (IEA fallback)', 
+                                'success': False,
+                                'reason': f'No nearest year for {target_year}',
+                                'region': region
+                            })
+                    else:
+                        source_attempts_tracking[base_region].append({
+                            'attempt': 'EU (IEA fallback)', 
+                            'success': False,
+                            'reason': f'Sheet {eu_sheet} not found',
+                            'region': region
+                        })
+            
+            if not source_used and not is_eu_country:
+                country_to_check = base_region
+                
+                iea_result = self.get_iea_data_for_region(country_to_check, scenario, use_weo=True)
+                if iea_result:
+                    source_type, sheet_name, data_scenario = iea_result
+                    high_impacts = self._calculate_from_iea_shares(source_type, sheet_name, data_scenario, country_to_check, target_year, base_region)
+                    if high_impacts:
+                        future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                        self._add_to_total(total_add, future_impact, amount_mj)
+                        source_used = source_type
+                        sheet_used = sheet_name
+                        source_attempts_tracking[base_region].append({
+                            'attempt': source_type, 
+                            'success': True,
+                            'region': region,
+                            'sheet': sheet_used
+                        })
+                        if base_region not in source_tracking:
+                            source_tracking[base_region] = []
+                        source_tracking[base_region].append({
+                            'region': region,
+                            'source': source_used,
+                            'sheet': sheet_used,
+                            'amount_mj': amount_mj
+                        })
+                        continue
+                    else:
+                        source_attempts_tracking[base_region].append({
+                            'attempt': 'IEA', 
+                            'success': False,
+                            'reason': 'No impacts calculated',
+                            'region': region
+                        })
+                
+                if scenario != 'LW':
+                    weo_scenario = 'CPS' if scenario == 'FS' else 'STEPS'
+                    
+                    country_name = self.code_to_country_name.get(country_to_check)
+                    if country_name:
+                        country_sheet_found = None
+                        for sheet in self.iea_weo_shares.keys():
+                            if f"({weo_scenario})" in sheet or f"({weo_scenario}" in sheet:
+                                sheet_country = sheet.split('(')[0].strip()
+                                
+                                country_name_lower = country_name.lower()
+                                sheet_country_lower = sheet_country.lower()
+                                
+                                if (country_name_lower == sheet_country_lower or 
+                                    country_name_lower in sheet_country_lower or
+                                    sheet_country_lower in country_name_lower):
+                                    
+                                    country_sheet_found = sheet
+                                    break
+                        
+                        if country_sheet_found:
+                            high_impacts = self._calculate_from_iea_shares("WEO_COUNTRY", country_sheet_found, weo_scenario, country_to_check, target_year, base_region)
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "WEO_COUNTRY"
+                                sheet_used = country_sheet_found
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'WEO_COUNTRY', 
+                                    'success': True,
+                                    'region': region,
+                                    'sheet': sheet_used
+                                })
+                                if base_region not in source_tracking:
+                                    source_tracking[base_region] = []
+                                source_tracking[base_region].append({
+                                    'region': region,
+                                    'source': source_used,
+                                    'sheet': sheet_used,
+                                    'amount_mj': amount_mj
+                                })
+                                continue
+                            else:
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'WEO_COUNTRY', 
+                                    'success': False,
+                                    'reason': 'No impacts calculated',
+                                    'region': region
+                                })
+                    
+                    region_sheet = self.find_weo_region_for_country(country_to_check, weo_scenario)
+                    if region_sheet:
+                        sheet_region_name = region_sheet.split('(')[0].strip().lower()
+                        if 'world' in sheet_region_name:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'WEO_REGION', 
+                                'success': False,
+                                'reason': 'Skipped World sheet for GLOBAL',
+                                'region': region,
+                                'sheet': region_sheet
+                            })
+                        else:
+                            high_impacts = self._calculate_from_iea_shares("WEO_REGION", region_sheet, weo_scenario, country_to_check, target_year, base_region)
+                            if high_impacts:
+                                future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                                self._add_to_total(total_add, future_impact, amount_mj)
+                                source_used = "WEO_REGION"
+                                sheet_used = region_sheet
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'WEO_REGION', 
+                                    'success': True,
+                                    'region': region,
+                                    'sheet': sheet_used
+                                })
+                                if base_region not in source_tracking:
+                                    source_tracking[base_region] = []
+                                source_tracking[base_region].append({
+                                    'region': region,
+                                    'source': source_used,
+                                    'sheet': sheet_used,
+                                    'amount_mj': amount_mj
+                                })
+                                continue
+                            else:
+                                source_attempts_tracking[base_region].append({
+                                    'attempt': 'WEO_REGION', 
+                                    'success': False,
+                                    'reason': 'No impacts calculated',
+                                    'region': region
+                                })
+            
+            if not source_used:
+                global_sheet = scenario_data['global']
+                if global_sheet in self.iea_global:
+                    global_df = self.iea_global[global_sheet]
+                    year_cols = [col for col in global_df.columns if str(col).isdigit()]
+                    nearest_year = self.get_nearest_year(target_year, year_cols)
+                    
+                    if nearest_year:
+                        high_impacts = {}
+                        for _, global_row in global_df.iterrows():
+                            impact_cat = global_row.iloc[0]
+                            if pd.notna(impact_cat) and nearest_year in global_df.columns:
+                                impact_kwh = global_row[nearest_year]
+                                if pd.notna(impact_kwh):
+                                    high_impacts[str(impact_cat)] = impact_kwh / 3.6
+                        
+                        if high_impacts:
+                            future_impact = self.apply_voltage_adjustment(high_impacts, voltage)
+                            self._add_to_total(total_add, future_impact, amount_mj)
+                            source_used = "GLOBAL"
+                            sheet_used = global_sheet
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'GLOBAL', 
+                                'success': True,
+                                'region': region,
+                                'sheet': sheet_used
+                            })
+                            if base_region not in source_tracking:
+                                source_tracking[base_region] = []
+                            source_tracking[base_region].append({
+                                'region': region,
+                                'source': source_used,
+                                'sheet': sheet_used,
+                                'amount_mj': amount_mj
+                            })
+                        else:
+                            source_attempts_tracking[base_region].append({
+                                'attempt': 'GLOBAL', 
+                                'success': False,
+                                'reason': 'No impacts calculated',
+                                'region': region
+                            })
+                    else:
+                        source_attempts_tracking[base_region].append({
+                            'attempt': 'GLOBAL', 
+                            'success': False,
+                            'reason': f'No nearest year for {target_year}',
+                            'region': region
+                        })
+                else:
+                    source_attempts_tracking[base_region].append({
+                        'attempt': 'GLOBAL', 
+                        'success': False,
+                        'reason': f'Sheet {global_sheet} not found',
+                        'region': region
+                    })
+                
+        return total_add
+        
+    def _calculate_from_iea_shares(self, source_type, sheet_name, data_scenario, region, target_year, tech_region=None):
+        impact_region = tech_region if tech_region else region
+        
+        if source_type == "ISP":
+            if sheet_name not in self.iea_shares:
+                return None
+            shares_df = self.iea_shares[sheet_name]
+        elif source_type in ["WEO_COUNTRY", "WEO_REGION"]:
+            if sheet_name not in self.iea_weo_shares:
+                return None
+            shares_df = self.iea_weo_shares[sheet_name]
+        else:
+            return None
+        
+        if source_type in ["WEO_COUNTRY", "WEO_REGION"] and 'Technology_Formatted' in shares_df.columns:
+            shares_df = shares_df.set_index('Technology_Formatted')
+        
+        year_columns = []
+        for col in shares_df.columns:
+            try:
+                int_val = int(float(col))
+                year_columns.append((col, int_val))
+            except (ValueError, TypeError):
+                continue
+        
+        if not year_columns:
+            return None
+        
+        int_years = [year_int for _, year_int in year_columns]
+        nearest_year_int = self.get_nearest_year(target_year, int_years)
+        
+        if not nearest_year_int:
+            return None
+        
+        nearest_year_col = None
+        for col, year_int in year_columns:
+            if year_int == nearest_year_int:
+                nearest_year_col = col
+                break
+        
+        if not nearest_year_col:
+            return None
+        
+        total = {}
+        
+        if source_type == "ISP":
+            shares_series = shares_df[nearest_year_col]
+            
+            for tech_name, share in shares_series.items():
+                if pd.notna(share) and share != 0:
+                    tech_name_str = str(tech_name).strip()
+                    tech_sheet = self.tech_mapping.get(tech_name_str)
+                    
+                    if tech_sheet:
+                        tech_impacts = self.get_region_tech_impacts(impact_region, tech_sheet)
+                        
+                        if tech_impacts:
+                            for impact_cat, impact_mj in tech_impacts.items():
+                                if impact_cat not in total:
+                                    total[impact_cat] = 0
+                                total[impact_cat] += share * impact_mj
+        else:
+            shares_series = shares_df[nearest_year_col]
+            
+            for idx, share in shares_series.items():
+                if pd.notna(share) and share != 0:
+                    tech_name = str(idx).strip()
+                    tech_sheet = self.tech_mapping.get(tech_name)
+                    
+                    if not tech_sheet and tech_name in self.tech_mapping.values():
+                        tech_sheet = tech_name
+                    
+                    if tech_sheet:
+                        tech_impacts = self.get_region_tech_impacts(impact_region, tech_sheet)
+                        
+                        if tech_impacts:
+                            for impact_cat, impact_mj in tech_impacts.items():
+                                if impact_cat not in total:
+                                    total[impact_cat] = 0
+                                total[impact_cat] += share * impact_mj
+        
+        return total
+    
+    def _calculate_from_ar6_shares(self, shares_dict, region):
+        total = {}
+        
+        for tech_sheet, share in shares_dict.items():
+            if tech_sheet:
+                tech_impacts = self.get_region_tech_impacts(region, tech_sheet)
+                
+                if tech_impacts:
+                    for impact_cat, impact_mj in tech_impacts.items():
+                        if impact_cat not in total:
+                            total[impact_cat] = 0
+                        total[impact_cat] += share * impact_mj
+        
+        return total
+    
+    def apply_voltage_adjustment(self, high_impacts, voltage):
+        if voltage == 'high':
+            return high_impacts
+        
+        if voltage == 'medium':
+            factor = 1.004526176
+        else:
+            factor = 1.112
+        
+        adjusted = {}
+        for impact_cat, impact in high_impacts.items():
+            adj_impact = impact * factor
+            if impact_cat in self.transmission_impacts:
+                adj_impact += self.transmission_impacts[impact_cat]
+            adjusted[impact_cat] = adj_impact
+        
+        return adjusted
+    
+    def _add_to_total(self, total_dict, impacts_dict, amount):
+        for impact_cat, impact_mj in impacts_dict.items():
+            if impact_cat not in total_dict:
+                total_dict[impact_cat] = 0
+            total_dict[impact_cat] += amount * impact_mj
+    
+    def run_calculation(self, option, target_year, scenario, ar6_model=None, ar6_scenario=None, use_eu_for_eu=True):
+        if target_year < 2025:
+            raise ValueError("Year must be 2025 or later")
+        
+        regions_data = self.extract_regions_from_excel()
+        
+        subtract_totals = self.read_subtract_totals()
+        
+        simapro_impacts = self.read_simapro_impacts()
+        
+        if option == 1:
+            add_impacts = self.calculate_future_impacts_option1(regions_data, target_year, scenario, use_eu_for_eu)
+        else:
+            if not ar6_model or not ar6_scenario:
+                raise ValueError("For Option 2, AR6 model and scenario required")
+            add_impacts = self.calculate_future_impacts_option2(regions_data, target_year, scenario, 
+                                                              ar6_model, ar6_scenario, use_eu_for_eu)
+        
+        standard_categories = [
+            'Acidification',
+            'Climate change',
+            'Climate change - Biogenic',
+            'Climate change - Fossil',
+            'Climate change - Land use and LU change',
+            'Ecotoxicity, freshwater',
+            'Ecotoxicity, freshwater - inorganics',
+            'Ecotoxicity, freshwater - organics',
+            'Particulate matter',
+            'Eutrophication, marine',
+            'Eutrophication, freshwater',
+            'Eutrophication, terrestrial',
+            'Human toxicity, cancer',
+            'Human toxicity, cancer - inorganics',
+            'Human toxicity, cancer - organics',
+            'Human toxicity, non-cancer',
+            'Human toxicity, non-cancer - inorganics',
+            'Human toxicity, non-cancer - organics',
+            'Ionising radiation',
+            'Land use',
+            'Ozone depletion',
+            'Photochemical ozone formation',
+            'Resource use, fossils',
+            'Resource use, minerals and metals',
+            'Water use'
+        ]
+        
+        results = []
+        
+        for impact_cat in standard_categories:
+            simapro = simapro_impacts.get(impact_cat, 0)
+            subtract = subtract_totals.get(impact_cat, 0)
+            add = add_impacts.get(impact_cat, 0)
+            final = simapro - subtract + add
+            
+            unit_map = {
+                'Acidification': 'mol H+ eq',
+                'Climate change': 'kg CO2 eq',
+                'Climate change - Biogenic': 'kg CO2 eq',
+                'Climate change - Fossil': 'kg CO2 eq',
+                'Climate change - Land use and LU change': 'kg CO2 eq',
+                'Ecotoxicity, freshwater': 'CTUe',
+                'Ecotoxicity, freshwater - inorganics': 'CTUe',
+                'Ecotoxicity, freshwater - organics': 'CTUe',
+                'Particulate matter': 'disease inc.',
+                'Eutrophication, marine': 'kg N eq',
+                'Eutrophication, freshwater': 'kg P eq',
+                'Eutrophication, terrestrial': 'mol N eq',
+                'Human toxicity, cancer': 'CTUh',
+                'Human toxicity, cancer - inorganics': 'CTUh',
+                'Human toxicity, cancer - organics': 'CTUh',
+                'Human toxicity, non-cancer': 'CTUh',
+                'Human toxicity, non-cancer - inorganics': 'CTUh',
+                'Human toxicity, non-cancer - organics': 'CTUh',
+                'Ionising radiation': 'kBq U-235 eq',
+                'Land use': 'Pt',
+                'Ozone depletion': 'kg CFC11 eq',
+                'Photochemical ozone formation': 'kg NMVOC eq',
+                'Resource use, fossils': 'MJ',
+                'Resource use, minerals and metals': 'kg Sb eq',
+                'Water use': 'm3 depriv.'
+            }
+            
+            unit = unit_map.get(impact_cat, '')
+            
+            results.append({
+                'Impact category': impact_cat,
+                'Unit': unit,
+                'SimaPro impact': simapro,
+                'Existing impacts to subtract': subtract,
+                'Future impacts to add': add,
+                'Final impact': final
+            })
+        
+        return pd.DataFrame(results)
+
+def main():
+    data_folder = "/Users/marioskordilas/Downloads/future_impacts_calculator"
+    
+    if not os.path.exists(data_folder):
+        os.makedirs(data_folder)
+        return
+    
+    calculator = FutureImpactsCalculator(data_folder)
+    
+    print("FUTURE IMPACTS CALCULATOR")
+    print("SELECT OPTION:")
+    print("1. Simplified (NG ESO UK + EU + IEA ISP + IEA WEO)")
+    print("2. Complex (NG ESO UK + AR6 + fallbacks to IEA or EU)")
+    option = int(input("Enter 1 or 2: "))
+    
+    target_year = int(input("Enter manufacturing year (2025 or later): "))
+    
+    print("SELECT SCENARIO:")
+    print("FS (IEA BAU + CPS, EU CENTRAL)")
+    print("ST (IEA STEPS, EU CETO)")
+    print("CT (IEA STEPS, EU CETO)")
+    print("LW (IEA ASPTARGET + NZE, EU CETO)")
+    scenario = input("Enter FS, ST, CT, or LW: ").upper()
+    
+    ar6_model = None
+    ar6_scenario = None
+    
+    if option == 2:
+        unique_models = calculator.ar6_data['Model'].unique()
+        unique_models_sorted = sorted(unique_models)
+        
+        print("AR6 MODEL SELECTION")
+        print(f"Available models: {len(unique_models_sorted)}")
+        
+        for i, model in enumerate(unique_models_sorted, 1):
+            print(f"{i:3d}. {model}")
+        
+        while True:
+            try:
+                selection = int(input(f"Select model (1-{len(unique_models_sorted)}): "))
+                if 1 <= selection <= len(unique_models_sorted):
+                    ar6_model = unique_models_sorted[selection - 1]
+                    break
+                else:
+                    print(f"Please enter a number between 1 and {len(unique_models_sorted)}")
+            except ValueError:
+                print("Please enter a valid number")
+        
+        model_scenarios = calculator.ar6_data[calculator.ar6_data['Model'] == ar6_model]['Scenario'].unique()
+        model_scenarios_sorted = sorted(model_scenarios)
+        
+        print(f"SCENARIO SELECTION for {ar6_model}")
+        print(f"Available scenarios: {len(model_scenarios_sorted)}")
+        
+        for i, scen in enumerate(model_scenarios_sorted, 1):
+            print(f"{i:3d}. {scen}")
+        
+        while True:
+            try:
+                selection = int(input(f"Select scenario (1-{len(model_scenarios_sorted)}): "))
+                if 1 <= selection <= len(model_scenarios_sorted):
+                    ar6_scenario = model_scenarios_sorted[selection - 1]
+                    break
+                else:
+                    print(f"Please enter a number between 1 and {len(model_scenarios_sorted)}")
+            except ValueError:
+                print("Please enter a valid number")
+    
+    print("EU DATA SELECTION")
+    print("For EU countries:")
+    print("1. Use EU data (same for all EU countries)")
+    print("2. Use IEA shares (country-specific, with ISP → WEO hierarchy)")
+    
+    while True:
+        try:
+            eu_choice_num = int(input("Enter 1 or 2: "))
+            if eu_choice_num == 1:
+                use_eu_for_eu = True
+                break
+            elif eu_choice_num == 2:
+                use_eu_for_eu = False
+                break
+            else:
+                print("Please enter 1 or 2")
+        except ValueError:
+            print("Please enter a valid number")
+    
+    try:
+        results = calculator.run_calculation(
+            option, target_year, scenario,
+            ar6_model, ar6_scenario, use_eu_for_eu
+        )
+        
+        output_path = os.path.join(data_folder, "Future_Impacts_Results.xlsx")
+        results.to_excel(output_path, index=False)
+        
+        print("CALCULATION COMPLETE!")
+        print(f"Results saved to: {output_path}")
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
