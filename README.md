@@ -10,11 +10,13 @@ Open source Python tool for calculating environmental impacts in accordance with
 Workflow:
 1. Download the complete "Future_impacts_calculator" folder and store it locally in "Downloads", e.g. /Users/yourname/Downloads/Future_impacts_calculator
 2. The dataset from "IEA, Energy Projections of IEA Countries – National Data, IEA (2025)" is not included in the abovementioned folder. The user will have to obtain the data through: https://www.iea.org/data-and-statistics/data-product/iea-statistics-package-isp-2 (a license is required)
-3. Export the process contribution inventory from SimaPro using default units
-4. Paste the exported data into cell A1 of "Paste results here" sheet in "impacts to subtract.xlsx" spreadsheet.
-5. Save the spreadsheet
-6. Run the python script, select the desired grid decarbonisation pathway and the year the material is to be manufactured
-7. Environmental impacts of materials manufactured in future can be found in "Future_Impacts_Results.xlsx"
+3. Using SimaPro, calculate all Ecoinvent High Voltage electricity market country mixes. This includes every available dataset of the form
+"Electricity, high voltage {CN}| market group for electricity, high voltage | Cut-off, U". Extract the results for all BS EN 15804:2012+A2:2019 impact categories and paste them into the “Countries electricities” sheet of the provided Excel file. These data are not supplied within the tool 
+4. For the material, or element to be analysed, export the process contribution inventory from SimaPro using default units
+5. Paste the exported data into cell A1 of "Paste results here" sheet in "impacts to subtract.xlsx" spreadsheet.
+6. Save the spreadsheet
+7. Run the python script, select the desired grid decarbonisation pathway and the year the material is to be manufactured
+8. Environmental impacts of materials manufactured in future can be found in "Future_Impacts_Results.xlsx"
 
 Details on the pathways and scenario mapping are provided in the associated publication:
 
