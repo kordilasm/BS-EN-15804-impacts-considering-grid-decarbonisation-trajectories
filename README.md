@@ -25,3 +25,7 @@ Details on the pathways and scenario mapping are provided in the associated publ
 Kordilas M, Mumovic D, Schwartz Y, et al (2025) Temporal myopia in building Life Cycle Assessment? High resolution versus coarse dynamics in climate change and grid decarbonisation [under review]. Building and Environment
 
 IEA World Energy Outlook Free Dataset is used under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 license (CC BY-NC-SA 4.0)
+
+ISO 3166 country codes can be accessed here https://www.iso.org/obp/ui/#search
+
+Ecoinvent geographies file can be accessed here https://support.ecoinvent.org/geographies
