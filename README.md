@@ -22,7 +22,7 @@ For the material to be analysed, export the process contribution inventory from 
 
 Details on the pathways and scenario mapping are provided in the associated publication:
 
-Kordilas M, Mumovic D, Schwartz Y, et al (2025) Temporal myopia in building Life Cycle Assessment? High resolution versus coarse dynamics in climate change and grid decarbonisation [under review]. Building and Environment
+Marios Kordilas, Dejan Mumovic, Yair Schwartz, Rob Cooke, Smith Mordak, Zaid Chalabi, Temporal myopia in building Life Cycle Assessment? Granular versus coarse dynamics in climate change and grid decarbonisation, Building and Environment, Volume 295, 2026, 114419, ISSN 0360-1323, https://doi.org/10.1016/j.buildenv.2026.114419.
 
 IEA World Energy Outlook Free Dataset is used under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 license (CC BY-NC-SA 4.0)
 
